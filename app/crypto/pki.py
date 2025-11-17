@@ -1,133 +1,110 @@
 """
-PKI and X.509 Certificate Utilities.
-
-- load_ca_cert: Loads the trusted Root CA certificate.
-- load_identity: Loads an entity's (client/server) cert and private key.
-- verify_certificate: Verifies a peer's certificate against the CA.
+Certificate handling helpers for loading and validating X.509 identities.
+Provides:
+- fetch_root_ca(): Load CA certificate
+- load_entity_credentials(): Load certificate + private key
+- validate_cert(): Perform CA signature, date, and CN checks
+- extract_cn(): Read the Common Name from a cert
 """
 
 import pathlib
 import datetime
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from cryptography.hazmat.primitives.serialization import (
-    load_pem_private_key,
-    load_pem_public_key
-)
 from cryptography.exceptions import InvalidSignature
 
-# --- Constants ---
 
-# Base directory for certificates
-CERT_DIR = pathlib.Path(__file__).parent.parent.parent / "certs"
-CA_CERT_FILE = CERT_DIR / "ca_cert.pem"
+# certificate directory and CA path
+CERT_FOLDER = pathlib.Path(__file__).resolve().parent.parent.parent / "certs"
+CA_PATH = CERT_FOLDER / "ca_cert.pem"
 
-# --- Public Functions ---
 
-def load_ca_cert() -> x509.Certificate:
-    """Loads the Root CA certificate from disk."""
+def fetch_root_ca() -> x509.Certificate:
+    """Load the root CA certificate from disk."""
     try:
-        with open(CA_CERT_FILE, "rb") as f:
+        with open(CA_PATH, "rb") as f:
             return x509.load_pem_x509_certificate(f.read())
     except FileNotFoundError:
-        print(f"Error: CA certificate not found at {CA_CERT_FILE}")
-        print("Please run 'scripts/gen_ca.py' first.")
+        print(f"CA certificate missing: {CA_PATH}")
+        print("Run 'scripts/gen_ca.py' to generate a new CA.")
         raise
-    except Exception as e:
-        print(f"Error loading CA certificate: {e}")
+    except Exception as err:
+        print(f"Failed to read CA certificate: {err}")
         raise
 
-def load_identity(base_path_str: str) -> tuple[x509.Certificate, rsa.RsaPrivateKey]:
-    """
-    Loads an entity's (client/server) certificate and private key.
-    
-    Args:
-        base_path_str: The base path, e.g., "certs/server" or "certs/client"
-    
-    Returns:
-        A tuple of (certificate, private_key)
-    """
-    base_path = pathlib.Path(base_path_str)
-    cert_file = base_path.with_name(base_path.name + "_cert.pem")
-    key_file = base_path.with_name(base_path.name + "_private_key.pem")
+
+def load_entity_credentials(prefix: str) -> tuple[x509.Certificate, rsa.RsaPrivateKey]:
+    """Load a certificate and its associated private key using a base prefix."""
+    base = pathlib.Path(prefix)
+
+    cert_path = base.with_name(base.name + "_cert.pem")
+    key_path = base.with_name(base.name + "_private_key.pem")
 
     try:
-        # Load the certificate
-        with open(cert_file, "rb") as f:
-            cert = x509.load_pem_x509_certificate(f.read())
-            
-        # Load the private key
-        with open(key_file, "rb") as f:
-            private_key = load_pem_private_key(f.read(), password=None)
-            
-        return cert, private_key
+        with open(cert_path, "rb") as f:
+            cert_obj = x509.load_pem_x509_certificate(f.read())
 
-    except FileNotFoundError as e:
-        print(f"Error: Identity file not found. Looked for {e.filename}")
-        print("Please run 'scripts/gen_cert.py' for both server and client.")
+        with open(key_path, "rb") as f:
+            priv_key = load_pem_private_key(f.read(), password=None)
+
+        return cert_obj, priv_key
+
+    except FileNotFoundError as missing:
+        print(f"Missing identity file: {missing.filename}")
+        print("Use 'scripts/gen_cert.py' to generate identities.")
         raise
-    except Exception as e:
-        print(f"Error loading identity from {base_path_str}: {e}")
+    except Exception as err:
+        print(f"Unable to load credentials for '{prefix}': {err}")
         raise
 
-def verify_certificate(
-    cert_to_verify: x509.Certificate,
+
+def validate_cert(
+    presented: x509.Certificate,
     ca_cert: x509.Certificate,
-    expected_cn: str
+    required_cn: str
 ) -> bool:
-    """
-    Verifies a received certificate based on assignment requirements.
-    
-    Checks:
-    1. Signature: Was it signed by our trusted CA?
-    2. Validity: Is it currently valid (not expired, not future-dated)?
-    3. Common Name: Does the CN match what we expect?
-    
-    Returns:
-        True if all checks pass.
-    Raises:
-        ValueError: If any check fails, with a specific reason.
-    """
-    
-    # 1. Check Signature (Authenticity)
+    """Validate a certificate using CA signature, time validity, and CN match."""
+
+    # verify CA signature
     try:
         ca_public_key = ca_cert.public_key()
         ca_public_key.verify(
-            cert_to_verify.signature,
-            cert_to_verify.tbs_certificate_bytes,
+            presented.signature,
+            presented.tbs_certificate_bytes,
             padding.PKCS1v15(),
-            cert_to_verify.signature_hash_algorithm,
+            presented.signature_hash_algorithm
         )
     except InvalidSignature:
-        raise ValueError("BAD_CERT: Signature is invalid. Not signed by our CA.")
-    
-    # 2. Check Time Validity (Freshness)
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    if now_utc < cert_to_verify.not_valid_before_utc:
-        raise ValueError(f"BAD_CERT: Certificate is not valid yet (valid from {cert_to_verify.not_valid_before_utc}).")
-    if now_utc > cert_to_verify.not_valid_after_utc:
-        raise ValueError(f"BAD_CERT: Certificate has expired (expired on {cert_to_verify.not_valid_after_utc}).")
+        raise ValueError("BAD_CERT: CA signature verification failed.")
+    except Exception as err:
+        raise ValueError(f"BAD_CERT: Signature check error: {err}")
 
-    # 3. Check Common Name (Identity)
+    # check certificate validity period
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    if now < presented.not_valid_before_utc:
+        raise ValueError(f"BAD_CERT: Certificate not active until {presented.not_valid_before_utc}.")
+
+    if now > presented.not_valid_after_utc:
+        raise ValueError(f"BAD_CERT: Certificate expired on {presented.not_valid_after_utc}.")
+
+    # check common name
     try:
-        cn_attribute = cert_to_verify.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0]
-        received_cn = cn_attribute.value
-        
-        if received_cn != expected_cn:
-            raise ValueError(f"BAD_CERT: Common Name mismatch. Expected '{expected_cn}', but got '{received_cn}'.")
-            
-    except (IndexError, AttributeError):
-        raise ValueError("BAD_CERT: Certificate does not have a Common Name.")
+        cn = presented.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+    except Exception:
+        raise ValueError("BAD_CERT: Certificate has no Common Name.")
 
-    # All checks passed
+    if cn != required_cn:
+        raise ValueError(f"BAD_CERT: Expected CN '{required_cn}', got '{cn}'.")
+
     return True
 
-def get_certificate_cn(cert: x509.Certificate) -> str:
-    """Helper function to extract the Common Name (CN) from a certificate."""
+
+def extract_cn(cert: x509.Certificate) -> str:
+    """Get the Common Name field from a certificate."""
     try:
-        cn_attribute = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0]
-        return cn_attribute.value
-    except (IndexError, AttributeError):
+        return cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+    except Exception:
         return "UNKNOWN"
