@@ -1,76 +1,63 @@
 """
-AES Encryption & Decryption Utilities.
-
-- Implements AES-128 in ECB mode.
-- Uses PKCS#7 padding for block alignment.
+AES-128 ECB mode encryption and decryption utilities with PKCS#7 padding.
 """
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
 
-AES_BLOCK_SIZE_BYTES = 128 // 8
+BLOCK_SIZE = 16  # AES block size in bytes for AES-128
 
-def encrypt(key: bytes, plaintext: bytes) -> bytes:
+def aes_encrypt(aes_key: bytes, data: bytes) -> bytes:
     """
-    Encrypts plaintext using AES-128-ECB with PKCS#7 padding.
+    Encrypt data using AES-128 in ECB mode with PKCS#7 padding.
     
     Args:
-        key: The 16-byte AES-128 key.
-        plaintext: The data to encrypt (bytes).
-        
+        aes_key: 16-byte AES key.
+        data: plaintext bytes.
+    
     Returns:
-        The encrypted ciphertext (bytes).
+        Encrypted ciphertext bytes.
     """
-    if len(key) != 16:
-        raise ValueError("AES key must be 16 bytes (for AES-128).")
-    
-    # 1. Create a PKCS#7 padder
-    padder = padding.PKCS7(AES_BLOCK_SIZE_BYTES * 8).padder()
-    
-    # 2. Apply padding to the plaintext
-    padded_plaintext = padder.update(plaintext) + padder.finalize()
-    
-    # 3. Create AES-128 ECB cipher object
-    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+    if len(aes_key) != 16:
+        raise ValueError("AES key must be exactly 16 bytes for AES-128.")
+
+    # pad the plaintext
+    padder = padding.PKCS7(BLOCK_SIZE * 8).padder()
+    padded_data = padder.update(data) + padder.finalize()
+
+    # create AES ECB cipher and encrypt
+    cipher = Cipher(algorithms.AES(aes_key), modes.ECB(), backend=default_backend())
     encryptor = cipher.encryptor()
+    encrypted = encryptor.update(padded_data) + encryptor.finalize()
     
-    # 4. Encrypt the padded data
-    ciphertext = encryptor.update(padded_plaintext) + encryptor.finalize()
-    
-    return ciphertext
+    return encrypted
 
-def decrypt(key: bytes, ciphertext: bytes) -> bytes:
+
+def aes_decrypt(aes_key: bytes, ciphertext: bytes) -> bytes:
     """
-    Decrypts ciphertext using AES-128-ECB and unpads with PKCS#7.
+    Decrypt ciphertext using AES-128 ECB and remove PKCS#7 padding.
     
     Args:
-        key: The 16-byte AES-128 key.
-        ciphertext: The data to decrypt (bytes).
-        
-    Returns:
-        The original plaintext (bytes).
-    """
-    if len(key) != 16:
-        raise ValueError("AES key must be 16 bytes (for AES-128).")
+        aes_key: 16-byte AES key.
+        ciphertext: encrypted bytes.
     
+    Returns:
+        Decrypted plaintext bytes.
+    """
+    if len(aes_key) != 16:
+        raise ValueError("AES key must be exactly 16 bytes for AES-128.")
+
     try:
-        # 1. Create AES-128 ECB cipher object
-        cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+        # create AES ECB cipher and decrypt
+        cipher = Cipher(algorithms.AES(aes_key), modes.ECB(), backend=default_backend())
         decryptor = cipher.decryptor()
-        
-        # 2. Decrypt the data
-        padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-        
-        # 3. Create a PKCS#7 unpadder
-        unpadder = padding.PKCS7(AES_BLOCK_SIZE_BYTES * 8).unpadder()
-        
-        # 4. Remove padding
-        plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
-        
+        padded_plain = decryptor.update(ciphertext) + decryptor.finalize()
+
+        # remove padding
+        unpadder = padding.PKCS7(BLOCK_SIZE * 8).unpadder()
+        plaintext = unpadder.update(padded_plain) + unpadder.finalize()
+
         return plaintext
-        
     except ValueError:
-        # This error is commonly raised if the key is wrong or data is corrupt,
-        # leading to invalid padding.
-        raise ValueError("Decryption failed. Data may be corrupt or key is incorrect.")
+        raise ValueError("Decryption failed: key may be wrong or data is corrupted.")
